@@ -1,5 +1,6 @@
 This My collage project Discirt Mathematics and Graph Theory 
 Here is the app Link : https://planar-graph-visualizer-p733teyxxkvqcccawbmbwd.streamlit.app/
+
 Planar Graph Visualizer is a dynamic Streamlit application for exploring planar graphs: check planarity, compute Euler’s formula, and interactively visualize graph structures in real time.
 
 It’s organized into five main sections—Home, Edit Graph, Live Graph, Learn, and Contact—each designed to guide you through understanding and working with graph planarity:
