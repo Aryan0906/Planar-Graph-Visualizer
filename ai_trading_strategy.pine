@@ -1,0 +1,466 @@
+//@version=6
+indicator("AI-Inspired Trading Strategy", overlay=true, max_labels_count=500)
+
+// =============================================================================
+// Exit Signal Enhancement
+// =============================================================================
+var exit_group = "Exit Signal Settings"
+exit_visibility = input.string("High", "Exit Signal Visibility", options=["Low", "Medium", "High"], group=exit_group)
+show_take_profit_lines = input.bool(true, "Show Take Profit Levels", group=exit_group)
+show_exit_arrows = input.bool(true, "Show Exit Arrows", group=exit_group)
+exit_signal_lookback = input.int(5, "Exit Signal Lookback", minval=1, maxval=20, group=exit_group)
+partial_exit_pct = input.float(2.0, "Partial Exit %", minval=0.5, maxval=10.0, step=0.5, group=exit_group)
+full_exit_pct = input.float(4.0, "Full Exit %", minval=1.0, maxval=20.0, step=0.5, group=exit_group)
+
+// =============================================================================
+// Live Market Settings
+// =============================================================================
+var live_group = "Live Market Settings"
+risk_reward_ratio = input.float(1.5, "Risk/Reward Ratio", minval=0.5, maxval=5.0, step=0.1, group=live_group)
+trailing_stop_pct = input.float(2.0, "Trailing Stop %", minval=0.5, maxval=10.0, step=0.5, group=live_group)
+take_profit_pct = input.float(4.0, "Take Profit %", minval=1.0, maxval=20.0, step=0.5, group=live_group)
+
+// =============================================================================
+// AI Parameters
+// =============================================================================
+var ai_group = "AI Weights"
+ai_weight_rsi = input.float(0.25, "AI: RSI Weight", minval=0, maxval=1, step=0.05, group=ai_group)
+ai_weight_macd = input.float(0.20, "AI: MACD Weight", minval=0, maxval=1, step=0.05, group=ai_group)
+ai_weight_ichimoku = input.float(0.30, "AI: Ichimoku Weight", minval=0, maxval=1, step=0.05, group=ai_group)
+ai_weight_volume = input.float(0.15, "AI: Volume Weight", minval=0, maxval=1, step=0.05, group=ai_group)
+ai_weight_sentiment = input.float(0.10, "AI: Sentiment Weight", minval=0, maxval=1, step=0.05, group=ai_group)
+
+// Simulated sentiment
+bullish_sentiment = input.bool(true, "Simulate Bullish Sentiment", group="Simulation Settings")
+
+// =============================================================================
+// Technical Indicators
+// =============================================================================
+// Moving Averages
+ema_fast = ta.ema(close, 9)
+ema_slow = ta.ema(close, 21)
+ema_trend = ema_fast > ema_slow ? 1 : ema_fast < ema_slow ? -1 : 0
+
+// RSI
+rsi = ta.rsi(close, 14)
+rsi_score = rsi < 30 ? 1.5 : 
+           rsi < 40 ? 1.2 : 
+           rsi < 50 ? 0.8 : 
+           rsi < 60 ? 0.5 : 
+           rsi < 70 ? -0.5 : -1.5
+
+// MACD
+[macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+macd_score = macdLine > signalLine and histLine > histLine[1] ? 1.2 : macdLine > signalLine ? 1.0 : macdLine < signalLine and histLine < histLine[1] ? -1.2 : -1.0
+
+// Ichimoku Cloud
+high_9 = ta.highest(high, 9)
+low_9 = ta.lowest(low, 9)
+high_26 = ta.highest(high, 26)
+low_26 = ta.lowest(low, 26)
+high_52 = ta.highest(high, 52)
+low_52 = ta.lowest(low, 52)
+
+conversionLine = (high_9 + low_9) / 2
+baseLine = (high_26 + low_26) / 2
+leadLine1 = (conversionLine + baseLine) / 2
+leadLine2 = (high_52 + low_52) / 2
+displacement = 26
+
+// Calculate Ichimoku score
+ichimoku_score = 0.0
+if close > leadLine1 and close > leadLine2
+    ichimoku_score := ichimoku_score + 1
+if conversionLine > baseLine
+    ichimoku_score := ichimoku_score + 1
+else
+    ichimoku_score := ichimoku_score - 1
+if close > baseLine
+    ichimoku_score := ichimoku_score + 0.5
+else
+    ichimoku_score := ichimoku_score - 0.5
+
+// Volume Analysis
+volume_ma = ta.sma(volume, 20)
+volume_score = volume > volume_ma * 1.5 ? 1.2 : 
+              volume > volume_ma ? 0.8 : 0.0
+
+// =============================================================================
+// AI Decision Engine
+// =============================================================================
+// Combine indicators with weights
+ai_score = (rsi_score * ai_weight_rsi) +
+          (macd_score * ai_weight_macd) +
+          (ichimoku_score * ai_weight_ichimoku) +
+          (volume_score * ai_weight_volume) +
+          (bullish_sentiment ? ai_weight_sentiment : -ai_weight_sentiment)
+
+// Generate primary signals
+buy_signal = ai_score >= 1.2 and ema_trend > 0 and close > baseLine
+sell_signal = ai_score <= -1.0 and ema_trend < 0 and close < baseLine
+
+// =============================================================================
+// Trade Management System
+// =============================================================================
+// Track active positions and trade history
+var float entry_price = na
+var float stop_loss_price = na
+var float take_profit_price = na
+var float trailing_stop_price = na
+var float partial_take_profit = na
+var bool in_position = false
+var int position_bars = 0
+var string trade_status = "NO POSITION"
+var float highest_since_entry = 0.0
+var float drawdown_from_peak = 0.0
+
+// Trade history tracking
+var int total_trades = 0
+var int winning_trades = 0
+var float last_exit_price = na
+var int bars_since_last_trade = 0
+var float max_price_reached = 0.0
+
+// Process buy signal
+if buy_signal and not in_position
+    entry_price := close
+    stop_loss_price := close * (1 - trailing_stop_pct/100)
+    take_profit_price := close * (1 + take_profit_pct/100)
+    partial_take_profit := close * (1 + partial_exit_pct/100)
+    trailing_stop_price := stop_loss_price
+    highest_since_entry := close
+    in_position := true
+    position_bars := 0
+    trade_status := "ACTIVE LONG"
+    bars_since_last_trade := 0
+    max_price_reached := close
+
+// Update position tracking
+if in_position
+    position_bars := position_bars + 1
+    highest_since_entry := math.max(highest_since_entry, high)
+    max_price_reached := math.max(max_price_reached, high)
+    drawdown_from_peak := (highest_since_entry - close) / highest_since_entry * 100
+    
+    // Update trailing stop if price moves in favorable direction
+    if close > entry_price and close > trailing_stop_price * (1 + trailing_stop_pct/100)
+        trailing_stop_price := math.max(trailing_stop_price, close * (1 - trailing_stop_pct/100))
+
+// =============================================================================
+// Enhanced Exit Signal Logic
+// =============================================================================
+// Multiple exit conditions with strength levels
+var partial_exit_triggered = false
+var full_exit_triggered = false
+
+// Trend reversal exit
+trend_reversal_exit = in_position and ema_trend < 0 and ema_fast < ema_slow
+
+// Technical indicator exit
+technical_exit = in_position and macdLine < signalLine and rsi < 40 and ai_score < 0
+
+// Stop loss exit
+stop_loss_exit = in_position and low <= trailing_stop_price
+
+// Take profit exit
+take_profit_exit = in_position and high >= take_profit_price
+
+// Partial profit exit
+partial_profit_exit = in_position and not partial_exit_triggered and high >= partial_take_profit
+
+// Momentum fading exit
+momentum_exit = in_position and position_bars > 10 and ai_score < -0.5 and rsi < 45
+
+// Drawdown protection exit
+drawdown_exit = in_position and drawdown_from_peak > trailing_stop_pct * 1.5
+
+// Combined exit signal
+exit_signal = trend_reversal_exit or technical_exit or stop_loss_exit or take_profit_exit or momentum_exit or drawdown_exit
+
+// Exit strength calculation
+exit_strength = 0
+
+if trend_reversal_exit
+    exit_strength := exit_strength + 3
+if technical_exit
+    exit_strength := exit_strength + 2
+if stop_loss_exit
+    exit_strength := exit_strength + 5
+if take_profit_exit
+    exit_strength := exit_strength + 4
+if momentum_exit
+    exit_strength := exit_strength + 2
+if drawdown_exit
+    exit_strength := exit_strength + 3
+
+strong_exit = exit_strength >= 4
+medium_exit = exit_strength >= 2 and exit_strength < 4
+weak_exit = exit_strength > 0 and exit_strength < 2
+
+// Process exits
+if in_position and exit_signal
+    if partial_profit_exit and not partial_exit_triggered
+        partial_exit_triggered := true
+    
+    if strong_exit or take_profit_exit or stop_loss_exit
+        in_position := false
+        last_exit_price := close
+        total_trades := total_trades + 1
+        if close > entry_price
+            winning_trades := winning_trades + 1
+        trade_status := stop_loss_exit ? "STOPPED OUT" : 
+                       take_profit_exit ? "PROFIT TARGET" : 
+                       "EXIT SIGNAL"
+        partial_exit_triggered := false
+        full_exit_triggered := false
+
+// Reset trade tracking when not in position
+if not in_position
+    bars_since_last_trade := bars_since_last_trade + 1
+    if bars_since_last_trade > 20
+        highest_since_entry := 0.0
+        drawdown_from_peak := 0.0
+        max_price_reached := 0.0
+
+// =============================================================================
+// Live Market Suggestions
+// =============================================================================
+var market_condition = "NEUTRAL"
+if ai_score > 1.5
+    market_condition := "STRONGLY BULLISH"
+else if ai_score > 0.5
+    market_condition := "MODERATELY BULLISH"
+else if ai_score < -1.5
+    market_condition := "STRONGLY BEARISH"
+else if ai_score < -0.5
+    market_condition := "MODERATELY BEARISH" 
+else
+    market_condition := "NEUTRAL"
+
+// Generate live market suggestions
+var string action_suggestion = "WAIT"
+var string exit_strategy = "NO EXIT NEEDED"
+
+// Entry suggestions
+if not in_position
+    if buy_signal
+        action_suggestion := "BUY NOW"
+    else if ai_score > 0.8 and ema_trend > 0
+        action_suggestion := "PREPARE TO BUY"
+    else if sell_signal
+        action_suggestion := "CONSIDER SHORT"
+    else
+        action_suggestion := "WAIT FOR SIGNAL"
+// Exit suggestions
+else
+    if strong_exit
+        exit_strategy := "EXIT IMMEDIATELY"
+    else if medium_exit
+        exit_strategy := "PREPARE TO EXIT"
+    else if partial_profit_exit
+        exit_strategy := "TAKE PARTIAL PROFITS"
+    else if position_bars > 15 and ai_score < 0
+        exit_strategy := "MOMENTUM FADING"
+    else if drawdown_from_peak > trailing_stop_pct
+        exit_strategy := "DRAWDOWN ALERT"
+    else
+        exit_strategy := "HOLD POSITION"
+
+// =============================================================================
+// Visualizations
+// =============================================================================
+// Plot EMAs
+plot(ema_fast, "Fast EMA", color.rgb(255, 165, 0), 2)
+plot(ema_slow, "Slow EMA", color.rgb(0, 100, 255), 2)
+
+// Plot Ichimoku Cloud
+p1 = plot(leadLine1, "Lead 1", color.green, offset = displacement - 1)
+p2 = plot(leadLine2, "Lead 2", color.red, offset = displacement - 1)
+cloud_color = leadLine1 > leadLine2 ? color.new(color.green, 85) : color.new(color.red, 85)
+fill(p1, p2, color=cloud_color)
+
+// Define global variables to track our lines
+var line trailing_stop_line = na
+var line take_profit_line = na
+var line entry_line = na
+var line partial_profit_line = na
+
+// Clear old lines and draw new ones if in a position
+if barstate.islast and show_take_profit_lines
+    // Delete previous lines
+    line.delete(trailing_stop_line)
+    line.delete(take_profit_line)
+    line.delete(entry_line)
+    line.delete(partial_profit_line)
+    
+    // Draw new lines if in position
+    if in_position
+        // Draw trailing stop line
+        trailing_stop_line := line.new(x1=bar_index - position_bars, y1=trailing_stop_price, x2=bar_index + 5, y2=trailing_stop_price, color=color.red, width=2, style=line.style_dashed,extend=extend.right)
+        
+        // Draw take profit line
+        take_profit_line := line.new(x1=bar_index - position_bars, y1=take_profit_price, x2=bar_index + 5, y2=take_profit_price, color=color.green, width=2, style=line.style_dashed,extend=extend.right)
+        
+        // Draw partial profit line
+        partial_profit_line := line.new(x1=bar_index - position_bars, y1=partial_take_profit, x2=bar_index + 5, y2=partial_take_profit, color=color.new(color.blue, 40), width=2, style=line.style_dotted,extend=extend.right)
+        
+        // Draw entry price line
+        entry_line := line.new(x1=bar_index - position_bars, y1=entry_price, x2=bar_index + 5, y2=entry_price, color=color.blue, width=1, style=line.style_dotted,extend=extend.right)
+
+// Buy/Sell Signals with icons
+plotshape(buy_signal, title="Buy Signal", 
+          style=shape.triangleup, location=location.belowbar, 
+          color=color.new(color.green, 0), size=size.normal,
+          text="BUY", textcolor=color.white)
+
+// ENHANCED EXIT SIGNALS: More visible exit markers
+// Different types of exit signals with distinct visuals
+plotshape(in_position and trend_reversal_exit, title="Trend Reversal Exit", 
+          style=shape.diamond, location=location.abovebar, 
+          color=color.new(color.purple, 20), size=size.normal,
+          text="TREND\nREVERSAL", textcolor=color.white)
+
+plotshape(in_position and stop_loss_exit, title="Stop Loss Exit", 
+          style=shape.xcross, location=location.abovebar, 
+          color=color.new(color.red, 0), size=size.large,
+          text="STOP\nLOSS", textcolor=color.white)
+
+plotshape(in_position and take_profit_exit, title="Take Profit Exit", 
+          style=shape.flag, location=location.abovebar, 
+          color=color.new(color.green, 0), size=size.large,
+          text="TAKE\nPROFIT", textcolor=color.white)
+
+plotshape(in_position and technical_exit, title="Technical Exit", 
+          style=shape.diamond, location=location.abovebar, 
+          color=color.new(color.orange, 20), size=size.normal,
+          text="TECH\nEXIT", textcolor=color.white)
+
+plotshape(in_position and momentum_exit, title="Momentum Exit", 
+          style=shape.circle, location=location.abovebar, 
+          color=color.new(color.yellow, 0), size=size.normal,
+          text="MOMENTUM\nFADING", textcolor=color.black)
+
+plotshape(in_position and partial_profit_exit and not partial_exit_triggered, title="Partial Exit", 
+          style=shape.labelup, location=location.abovebar, 
+          color=color.new(color.blue, 20), size=size.normal,
+          text="PARTIAL\nEXIT", textcolor=color.white)
+
+// Strong exit signal (combination of factors)
+plotshape(in_position and strong_exit, title="Strong Exit Signal", 
+          style=shape.triangledown, location=location.abovebar, 
+          color=color.new(color.red, 0), size=size.large,
+          text="EXIT\nNOW", textcolor=color.white)
+
+// =============================================================================
+// Live Market Status Display
+// =============================================================================
+var table statusTable = table.new(position.top_right, 2, 9, color.new(color.black, 60), 
+                                 border_color=color.gray, border_width=1)
+
+if barstate.islast
+    // Update table with latest information
+    table.cell(statusTable, 0, 0, "AI MARKET STATUS", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 0, market_condition, 
+              bgcolor=market_condition == "STRONGLY BULLISH" ? color.new(color.green, 70) : 
+                     market_condition == "MODERATELY BULLISH" ? color.new(color.green, 85) :
+                     market_condition == "STRONGLY BEARISH" ? color.new(color.red, 70) :
+                     market_condition == "MODERATELY BEARISH" ? color.new(color.red, 85) :
+                     color.new(color.gray, 85), 
+              text_color=color.white, text_size=size.small)
+              
+    table.cell(statusTable, 0, 1, "SUGGESTED ACTION", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 1, action_suggestion, 
+              bgcolor=action_suggestion == "BUY NOW" ? color.new(color.green, 70) :
+                     action_suggestion == "PREPARE TO BUY" ? color.new(color.green, 85) :
+                     action_suggestion == "CONSIDER SHORT" ? color.new(color.red, 70) :
+                     color.new(color.gray, 85),
+              text_color=color.white, text_size=size.small)
+              
+    table.cell(statusTable, 0, 2, "POSITION STATUS", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 2, in_position ? "IN POSITION" : "NO POSITION", 
+              bgcolor=in_position ? color.new(color.green, 85) : color.new(color.gray, 85),
+              text_color=color.white, text_size=size.small)
+              
+    table.cell(statusTable, 0, 3, "EXIT STRATEGY", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 3, exit_strategy, 
+              bgcolor=exit_strategy == "EXIT IMMEDIATELY" ? color.new(color.red, 50) :
+                     exit_strategy == "PREPARE TO EXIT" ? color.new(color.red, 70) :
+                     exit_strategy == "TAKE PARTIAL PROFITS" ? color.new(color.blue, 70) :
+                     exit_strategy == "DRAWDOWN ALERT" ? color.new(color.orange, 80) :
+                     exit_strategy == "MOMENTUM FADING" ? color.new(color.yellow, 85) :
+                     color.new(color.gray, 85),
+              text_color=color.white, text_size=size.small)
+              
+    table.cell(statusTable, 0, 4, "AI SCORE", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 4, str.tostring(ai_score, "#.##"), 
+              bgcolor=ai_score > 1 ? color.new(color.green, 85) :
+                     ai_score > 0 ? color.new(color.green, 95) :
+                     ai_score < -1 ? color.new(color.red, 85) :
+                     ai_score < 0 ? color.new(color.red, 95) :
+                     color.new(color.gray, 85),
+              text_color=color.white, text_size=size.small)
+    
+    // Add position metrics
+    if in_position
+        table.cell(statusTable, 0, 5, "CURRENT P/L", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+        pl_pct = (close - entry_price) / entry_price * 100
+        table.cell(statusTable, 1, 5, str.tostring(pl_pct, "#.##") + "%", 
+                  bgcolor=pl_pct > 0 ? color.new(color.green, 85) : color.new(color.red, 85),
+                  text_color=color.white, text_size=size.small)
+        
+        table.cell(statusTable, 0, 6, "DRAWDOWN", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+        table.cell(statusTable, 1, 6, str.tostring(drawdown_from_peak, "#.##") + "%", 
+                  bgcolor=drawdown_from_peak > trailing_stop_pct ? color.new(color.red, 70) : 
+                         drawdown_from_peak > trailing_stop_pct/2 ? color.new(color.orange, 80) :
+                         color.new(color.green, 90),
+                  text_color=color.white, text_size=size.small)
+    else
+        table.cell(statusTable, 0, 5, "RISK LEVEL", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+        risk_level = "NONE"
+        table.cell(statusTable, 1, 5, risk_level, 
+                  bgcolor=color.new(color.gray, 85),
+                  text_color=color.white, text_size=size.small)
+                  
+        table.cell(statusTable, 0, 6, "TRADE STATS", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+        win_rate = total_trades > 0 ? (winning_trades / total_trades) * 100 : 0
+        table.cell(statusTable, 1, 6, "Win: " + str.tostring(win_rate, "#") + "%", 
+                  bgcolor=color.new(color.gray, 85),
+                  text_color=color.white, text_size=size.small)
+              
+    // Add key price levels to the table
+    table.cell(statusTable, 0, 7, "KEY LEVELS", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 7, "S: " + str.tostring(math.round_to_mintick(close * 0.98)) + 
+                               " | R: " + str.tostring(math.round_to_mintick(close * 1.02)), 
+              bgcolor=color.new(color.gray, 85),
+              text_color=color.white, text_size=size.small)
+              
+    // Add exit signals summary
+    table.cell(statusTable, 0, 8, "EXIT SIGNALS", bgcolor=color.new(color.blue, 90), text_color=color.white, text_size=size.small)
+    exit_signals_text = strong_exit ? "STRONG" : medium_exit ? "MEDIUM" : weak_exit ? "WEAK" : "NONE"
+    table.cell(statusTable, 1, 8, exit_signals_text, 
+              bgcolor=strong_exit ? color.new(color.red, 50) :
+                     medium_exit ? color.new(color.orange, 70) :
+                     weak_exit ? color.new(color.yellow, 80) :
+                     color.new(color.gray, 85),
+              text_color=color.white, text_size=size.small)
+
+// =============================================================================
+// Alerts
+// =============================================================================
+alertcondition(buy_signal, title="AI Buy Signal", 
+  message="AI_BUY {{ticker}} @ {{close}}")
+  
+alertcondition(sell_signal, title="AI Sell Signal", 
+  message="AI_SELL {{ticker}} @ {{close}}")
+  
+alertcondition(in_position and stop_loss_exit, title="Stop Loss Hit", 
+  message="STOP_LOSS {{ticker}} @ {{close}}")
+  
+alertcondition(in_position and take_profit_exit, title="Take Profit Hit", 
+  message="TAKE_PROFIT {{ticker}} @ {{close}}")
+
+alertcondition(in_position and strong_exit, title="Urgent Exit Required", 
+  message="URGENT_EXIT {{ticker}} @ {{close}}")
+  
+alertcondition(in_position and partial_profit_exit and not partial_exit_triggered, title="Take Partial Profits", 
+  message="PARTIAL_PROFIT {{ticker}} @ {{close}}")
