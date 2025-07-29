@@ -36,3 +36,13 @@ It’s organized into five main sections—Home, Edit Graph, Live Graph, Learn, 
   `streamlit run dmgt.py`  
 
 This tool bridges theoretical graph concepts and hands‑on exploration, making planar graph analysis accessible and visually engaging.
+
+## Additional Resources
+
+### 📊 AI Trading Strategy (Pine Script)
+This repository also includes an advanced AI-inspired trading strategy written in Pine Script for TradingView:
+- **File**: `ai_trading_strategy.pine`
+- **Documentation**: `PINE_SCRIPT_README.md`
+- **Features**: Multi-indicator AI decision engine, advanced exit signals, risk management, and live market analysis
+
+The Pine Script is independent of the main graph visualization application and provides a comprehensive trading strategy for financial market analysis.
